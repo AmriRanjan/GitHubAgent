@@ -7,7 +7,7 @@ from langchain.agents import create_tool_calling_agent
 from langchain.agents import AgentExecutor
 from langchain.tools.retriever import create_retriever_tool
 from langchainhub import hub
-from github import fetch_github_issues
+from src.github import fetch_github_issues
 
 load_dotenv()
 
