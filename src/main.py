@@ -3,11 +3,10 @@ import os
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_astradb import AstraDBVectorStore
-from langchain.agents import create_tool_calling_agent
-from langchain.agents import AgentExecutor
-from langchain.tools.retriever import create_retriever_tool
-from langchainhub import hub
-from src.github import fetch_github_issues
+from langchain_core.tools.retriever import create_retriever_tool
+from github import fetch_github_issues
+from note import note_tool
+from langchain.agents import create_agent
 
 load_dotenv()
 
@@ -56,20 +55,41 @@ if want_to_update_vectorstore:
     for result in results:
         print(f"* {result.page_content} {result.metadata}")
 
-retriever = vstore.as_retriever(search_kwargs = {"k": 3})
+retriever = vstore.as_retriever(
+    search_type = "similarity",
+    search_kwargs = {"k": 3}
+)
+
 retriever_tool = create_retriever_tool(
     retriever,
     "github_search",
     "Search for information about github issues. For any questions about github issues, you must use this tool!",
 )
 
-prompt = hub.pull("hwchase17/openai-functions-agent")
 llm = ChatOpenAI()
 
 tools = [retriever_tool, note_tool]
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent = agent, tools = tools, verbose = False)
 
-while (question := input("Ask a question about github issues (q to quit): ")) != "q":
-    result = agent_executor.invoke({"input": question})
-    print(result["output"])
+agent = create_agent(
+    model = llm,
+    tools = tools
+)
+
+# prompt = hub.pull("hwchase17/openai-functions-agent")
+# llm = ChatOpenAI()
+
+# tools = [retriever_tool, note_tool]
+# agent = create_tool_calling_agent(llm, tools, prompt)
+# agent_executor = AgentExecutor(agent = agent, tools = tools, verbose = False)
+
+question = input("Ask a question about github issues (q to quit): ")
+
+while question != "q":
+    result = agent.invoke({
+        "messages": [
+            {"role": "user", "content": question}
+        ]
+    })
+
+    print(result["messages"][-1].content)
+    question = input("Ask a question about github issues (q to quit): ")
