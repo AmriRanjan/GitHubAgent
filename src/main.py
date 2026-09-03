@@ -1,16 +1,20 @@
+# src/main.py
+
 from dotenv import load_dotenv
 import os
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_astradb import AstraDBVectorStore
-from langchain_core.tools.retriever import create_retriever_tool
-from github import fetch_github_issues
+from langchain.agents import create_tool_calling_agent
+from langchain.agents import AgentExecutor
+from langchain.tools.retriever import create_retriever_tool
+from langchain import hub
+from github import fetch_github_issues, fetch_default_branch, fetch_repo_tree, filter_code_files, load_code
 from note import note_tool
-from langchain.agents import create_agent
 
 load_dotenv()
 
-def connect_to_vstore():
+def connect_to_vstore(collection_name):
     embeddings = OpenAIEmbeddings()
     ASTRA_DB_API_ENDPOINT = os.getenv("ASTRA_DB_API_ENDPOINT")
     ASTRA_DB_APPLICATION_TOKEN = os.getenv("ASTRA_DB_APPLICATION_TOKEN")
@@ -23,7 +27,7 @@ def connect_to_vstore():
 
     vstore = AstraDBVectorStore(
         embedding = embeddings,
-        collection_name = "github",
+        collection_name = collection_name,
         api_endpoint = ASTRA_DB_API_ENDPOINT,
         token = ASTRA_DB_APPLICATION_TOKEN,
         namespace = ASTRA_DB_KEYSPACE,
@@ -31,32 +35,64 @@ def connect_to_vstore():
     
     return vstore
 
+issue_vstore = connect_to_vstore("github")
+code_vstore = connect_to_vstore("github_code")
 
-vstore = connect_to_vstore()
-want_to_update_vectorstore = input("Do you want to update the issues? (y/N): ").lower() in [
-    "yes",
-    "y",
-]
+owner = input("Enter the owner of the repository: ")
+repo = input("Enter the repository name: ")
+
+branch = fetch_default_branch(owner, repo)
+
+print("Default branch:", branch)
+
+tree = fetch_repo_tree(owner, repo, branch)
+
+files = filter_code_files(tree)
+
+print("Files:")
+for file in files:
+    print(file)
+
+code_docs = load_code(
+    owner,
+    repo,
+    branch,
+    files
+)
+
+print("Number of documents:", len(code_docs))
+
+code_vstore.add_documents(code_docs)
+
+want_to_update_vectorstore = input("Do you want to update the issues? (y/N): ")
+while want_to_update_vectorstore != "y" and want_to_update_vectorstore != "N":
+    want_to_update_vectorstore = input("Invalid input. Do you want to update the issues? (y/N): ")
+if want_to_update_vectorstore == "y":
+    want_to_update_vectorstore = True
+else:
+    want_to_update_vectorstore = False
 
 if want_to_update_vectorstore:
-    owner = input("Enter the GitHub username: ")
-    repo = input("Enter the repository name: ")
     issues = fetch_github_issues(owner, repo)
 
+    if issues is None:
+        print("Failed to fetch issues. Please check the repository details and try again.")
+        raise SystemExit(1)
+
     try:
-        vstore.delete_collection()
+        issue_vstore.delete_collection()
     except:
         pass
 
-    vstore = connect_to_vstore()
-    vstore.add_documents(issues)
+    issue_vstore = connect_to_vstore("github")
+    issue_vstore.add_documents(issues)
 
-    results = vstore.similarity_search("flash messages", k = 3)
-    for result in results:
-        print(f"* {result.page_content} {result.metadata}")
+    # results = vstore.similarity_search("flash messages", k = 3)
+    # for result in results:
+    #     print(f"* {result.page_content} {result.metadata}")
 
-retriever = vstore.as_retriever(
-    search_type = "similarity",
+retriever = issue_vstore.as_retriever(
+    # search_type = "similarity" (assumed default),
     search_kwargs = {"k": 3}
 )
 
@@ -66,30 +102,38 @@ retriever_tool = create_retriever_tool(
     "Search for information about github issues. For any questions about github issues, you must use this tool!",
 )
 
-llm = ChatOpenAI()
-
-tools = [retriever_tool, note_tool]
-
-agent = create_agent(
-    model = llm,
-    tools = tools
+code_retriever = code_vstore.as_retriever(
+    # search_type = "similarity" (assumed default),
+    search_kwargs = {"k": 3}
 )
 
-# prompt = hub.pull("hwchase17/openai-functions-agent")
-# llm = ChatOpenAI()
+code_tool = create_retriever_tool(
+    code_retriever,
+    "code_search",
+    "Search the repository source code and documentation. "
+    "Use this tool for questions about how the repository "
+    "works, what the code does, or how different parts of "
+    "the repository are implemented."
+)
 
-# tools = [retriever_tool, note_tool]
-# agent = create_tool_calling_agent(llm, tools, prompt)
-# agent_executor = AgentExecutor(agent = agent, tools = tools, verbose = False)
+prompt = hub.pull(
+    "hwchase17/openai-functions-agent",
+)
 
-question = input("Ask a question about github issues (q to quit): ")
+llm = ChatOpenAI(
+    model = "gpt-4o-mini",
+    temperature = 0,
+    max_tokens = 700
+    )
 
-while question != "q":
-    result = agent.invoke({
-        "messages": [
-            {"role": "user", "content": question}
-        ]
-    })
+tools = [retriever_tool, code_tool, note_tool]
+agent = create_tool_calling_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent = agent, tools = tools, verbose = False)
 
-    print(result["messages"][-1].content)
+while True:
     question = input("Ask a question about github issues (q to quit): ")
+    if question == "q":
+        break
+
+    result = agent_executor.invoke({"input": question})
+    print(result["output"])
